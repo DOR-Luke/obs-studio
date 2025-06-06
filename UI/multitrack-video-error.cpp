@@ -35,7 +35,7 @@ bool MultitrackVideoError::ShowDialog(
 		QAbstractButton *yesButton =
 			mb.addButton(QTStr("Yes"), QMessageBox::YesRole);
 		mb.addButton(QTStr("No"), QMessageBox::NoRole);
-		mb.exec();
+		//mb.exec();
 
 		return mb.clickedButton() == yesButton;
 	} else if (type == Type::Critical) {
@@ -43,7 +43,7 @@ bool MultitrackVideoError::ShowDialog(
 		mb.setIcon(QMessageBox::Critical);
 		mb.setStandardButtons(
 			QMessageBox::StandardButton::Ok); // cannot continue
-		mb.exec();
+		//mb.exec();
 	}
 
 	return false;

@@ -9995,7 +9995,7 @@ void OBSBasic::SystemTray(bool firstStarted)
 	if (!sysTrayEnabled) {
 		trayIcon->hide();
 	} else {
-		trayIcon->show();
+		trayIcon->hide();
 		if (firstStarted && (sysTrayWhenStarted || opt_minimize_tray)) {
 			EnablePreviewDisplay(false);
 #ifdef __APPLE__

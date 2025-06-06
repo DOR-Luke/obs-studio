@@ -650,7 +650,7 @@ bool MultitrackVideoOutput::HandleIncompatibleSettings(
 		QMessageBox::AcceptRole);
 	mb.setStandardButtons(QMessageBox::StandardButton::Cancel);
 
-	mb.exec();
+	//mb.exec();
 
 	const char *action = "cancel";
 	if (mb.clickedButton() == this_stream) {
@@ -889,7 +889,7 @@ static void handle_speaker_layout_issues(
 			mb.setStandardButtons(
 				QMessageBox::StandardButton::Cancel);
 
-			mb.exec();
+			//mb.exec();
 		},
 		BlockingConnectionTypeFor(parent));
 
