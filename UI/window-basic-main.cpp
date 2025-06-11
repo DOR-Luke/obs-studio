@@ -10847,6 +10847,8 @@ const char *OBSBasic::GetCurrentOutputPath()
 
 void OBSBasic::OutputPathInvalidMessage()
 {
+	if (api)
+		api->on_event(OBS_INVALID_OUTPUT_PATH);
 	blog(LOG_ERROR, "Recording stopped because of bad output path");
 
 	OBSMessageBox::critical(this, QTStr("Output.BadPath.Title"),
