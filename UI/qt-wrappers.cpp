@@ -31,6 +31,11 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QToolBar>
+#include <QStandardPaths>
+#include <QDir>
+#include <QDateTime>
+#include <QFile>
+#include <QTextStream>
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <obs-nix-platform.h>
@@ -56,68 +61,73 @@ void OBSErrorBox(QWidget *parent, const char *msg, ...)
 	va_end(args);
 }
 
+void WriteToLog(const QString &type, const QString &title, const QString &text)
+{
+	QString appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+	// obs64 제거
+	appDataPath = appDataPath.left(appDataPath.lastIndexOf("/"));
+	QString logDir = appDataPath + "/DOR.GG/logs";
+	
+	// 디버그용 메시지 박스
+	// QMessageBox::information(nullptr, "Log Directory", 
+	// 	QString("AppData Path: %1\nLog Directory: %2")
+	// 	.arg(appDataPath)
+	// 	.arg(logDir));
+	
+	// 디렉토리 생성 시도
+	if (!QDir().mkpath(logDir)) {
+		return;
+	}
+	
+	// title이 "OBS"인 경우 recorder.log에, 그 외의 경우 main.log에 기록
+	QString logFile = logDir + (title == "OBS" ? "/recorder.log" : "/main.log");
+	QFile file(logFile);
+	
+	// 파일 열기 시도
+	if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+		return;
+	}
+	
+	// 로그 기록
+	QTextStream stream(&file);
+	QString timestamp = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss");
+	stream << QString("[%1] [%2] %3: %4\n")
+		.arg(timestamp)
+		.arg(type)
+		.arg(title)
+		.arg(text);
+	
+	// 스트림 플러시 및 파일 닫기
+	stream.flush();
+	file.close();
+}
+
 QMessageBox::StandardButton
 OBSMessageBox::question(QWidget *parent, const QString &title,
 			const QString &text,
 			QMessageBox::StandardButtons buttons,
 			QMessageBox::StandardButton defaultButton)
 {
-	QMessageBox mb(QMessageBox::Question, title, text,
-		       QMessageBox::NoButton, parent);
-	mb.setDefaultButton(defaultButton);
-
-	if (buttons & QMessageBox::Ok) {
-		QPushButton *button = mb.addButton(QMessageBox::Ok);
-		button->setText(QTStr("OK"));
-	}
-#define add_button(x)                                               \
-	if (buttons & QMessageBox::x) {                             \
-		QPushButton *button = mb.addButton(QMessageBox::x); \
-		button->setText(QTStr(#x));                         \
-	}
-	add_button(Open);
-	add_button(Save);
-	add_button(Cancel);
-	add_button(Close);
-	add_button(Discard);
-	add_button(Apply);
-	add_button(Reset);
-	add_button(Yes);
-	add_button(No);
-	add_button(Abort);
-	add_button(Retry);
-	add_button(Ignore);
-#undef add_button
-	return (QMessageBox::StandardButton)mb.exec();
+	WriteToLog("QUESTION", title, text);
+	return defaultButton;
 }
 
 void OBSMessageBox::information(QWidget *parent, const QString &title,
 				const QString &text)
 {
-	QMessageBox mb(QMessageBox::Information, title, text,
-		       QMessageBox::NoButton, parent);
-	mb.addButton(QTStr("OK"), QMessageBox::AcceptRole);
-	mb.exec();
+	WriteToLog("INFO", title, text);
 }
 
 void OBSMessageBox::warning(QWidget *parent, const QString &title,
 			    const QString &text, bool enableRichText)
 {
-	QMessageBox mb(QMessageBox::Warning, title, text, QMessageBox::NoButton,
-		       parent);
-	if (enableRichText)
-		mb.setTextFormat(Qt::RichText);
-	mb.addButton(QTStr("OK"), QMessageBox::AcceptRole);
-	mb.exec();
+	WriteToLog("WARNING", title, text);
 }
 
 void OBSMessageBox::critical(QWidget *parent, const QString &title,
 			     const QString &text)
 {
-	QMessageBox mb(QMessageBox::Critical, title, text,
-		       QMessageBox::NoButton, parent);
-	mb.addButton(QTStr("OK"), QMessageBox::AcceptRole);
-	mb.exec();
+	WriteToLog("CRITICAL", title, text);
 }
 
 bool QTToGSWindow(QWindow *window, gs_window &gswindow)

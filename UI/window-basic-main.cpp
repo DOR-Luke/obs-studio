@@ -7283,12 +7283,14 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 					  .arg(last_error);
 		OBSMessageBox::warning(this, QTStr("Output.RecordError.Title"),
 				       msg);
-
+		if (api)
+			api->on_event(OBS_RECORDING_ERROR);
 	} else if (code == OBS_OUTPUT_NO_SPACE && isVisible()) {
 		OBSMessageBox::warning(this,
 				       QTStr("Output.RecordNoSpace.Title"),
 				       QTStr("Output.RecordNoSpace.Msg"));
-
+		if (api)
+			api->on_event(OBS_LOW_DISK_SPACE);
 	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
 
 		const char *errorDescription;
@@ -7305,7 +7307,8 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 
 		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"),
 					QT_UTF8(errorMessage));
-
+		if (api)
+			api->on_event(OBS_RECORDING_ERROR);
 	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"),
 			      QSystemTrayIcon::Warning);
@@ -7528,11 +7531,13 @@ void OBSBasic::ReplayBufferStop(int code)
 		OBSMessageBox::warning(this,
 				       QTStr("Output.RecordNoSpace.Title"),
 				       QTStr("Output.RecordNoSpace.Msg"));
-
+		if (api)
+			api->on_event(OBS_LOW_DISK_SPACE);
 	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
 		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"),
 					QTStr("Output.RecordError.Msg"));
-
+		if (api)
+			api->on_event(OBS_RECORDING_ERROR);
 	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"),
 			      QSystemTrayIcon::Warning);
@@ -9341,7 +9346,7 @@ void OBSBasic::SystemTray(bool firstStarted)
 	if (!sysTrayEnabled) {
 		trayIcon->hide();
 	} else {
-		trayIcon->show();
+		trayIcon->hide();
 		if (firstStarted && (sysTrayWhenStarted || opt_minimize_tray)) {
 			EnablePreviewDisplay(false);
 #ifdef __APPLE__
@@ -10097,6 +10102,8 @@ const char *OBSBasic::GetCurrentOutputPath()
 
 void OBSBasic::OutputPathInvalidMessage()
 {
+	if (api)
+		api->on_event(OBS_INVALID_OUTPUT_PATH);
 	blog(LOG_ERROR, "Recording stopped because of bad output path");
 
 	OBSMessageBox::critical(this, QTStr("Output.BadPath.Title"),
@@ -10124,7 +10131,8 @@ bool OBSBasic::OutputPathValid()
 void OBSBasic::DiskSpaceMessage()
 {
 	blog(LOG_ERROR, "Recording stopped because of low disk space");
-
+	if (api)
+		api->on_event(OBS_LOW_DISK_SPACE);
 	OBSMessageBox::critical(this, QTStr("Output.RecordNoSpace.Title"),
 				QTStr("Output.RecordNoSpace.Msg"));
 }

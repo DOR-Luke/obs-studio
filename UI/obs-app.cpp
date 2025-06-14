@@ -366,54 +366,42 @@ static inline bool too_many_repeated_entries(fstream &logFile, const char *msg,
 
 	return false;
 }
+static mutex log_mutex;
+static fstream logFile;
 
 static void do_log(int log_level, const char *msg, va_list args, void *param)
 {
 	fstream &logFile = *static_cast<fstream *>(param);
-	char str[4096];
-
-#ifndef _WIN32
-	va_list args2;
-	va_copy(args2, args);
-#endif
-
-	vsnprintf(str, sizeof(str), msg, args);
-
-#ifdef _WIN32
-	if (IsDebuggerPresent()) {
-		int wNum = MultiByteToWideChar(CP_UTF8, 0, str, -1, NULL, 0);
-		if (wNum > 1) {
-			static wstring wide_buf;
-			static mutex wide_mutex;
-
-			lock_guard<mutex> lock(wide_mutex);
-			wide_buf.reserve(wNum + 1);
-			wide_buf.resize(wNum - 1);
-			MultiByteToWideChar(CP_UTF8, 0, str, -1, &wide_buf[0],
-					    wNum);
-			wide_buf.push_back('\n');
-
-			OutputDebugStringW(wide_buf.c_str());
-		}
+	char out[4096];
+	vsnprintf(out, sizeof(out), msg, args);
+	if (!logFile.is_open())
+		return;
+		// DOR.GG 로그에 기록
+	QString type;
+	switch (log_level) {
+	case LOG_DEBUG:
+		type = "DEBUG";
+		break;
+	case LOG_INFO:
+		type = "INFO";
+		break;
+	case LOG_WARNING:
+		type = "WARNING";
+		break;
+	case LOG_ERROR:
+		type = "ERROR";
+		break;
+	default:
+		type = "UNKNOWN";
 	}
-#endif
+	WriteToLog(type, "OBS", out);
 
-	if (log_level <= LOG_INFO || log_verbose) {
-#ifndef _WIN32
-		def_log_handler(log_level, msg, args2, nullptr);
-#endif
-		if (!too_many_repeated_entries(logFile, msg, str))
-			LogStringChunk(logFile, str, log_level);
-	}
+	lock_guard<mutex> guard(log_mutex);
 
-#if defined(_WIN32) && defined(OBS_DEBUGBREAK_ON_ERROR)
-	if (log_level <= LOG_ERROR && IsDebuggerPresent())
-		__debugbreak();
-#endif
-
-#ifndef _WIN32
-	va_end(args2);
-#endif
+time_t now = time(0);
+	char *timeString = ctime(&now);
+	if (timeString && strlen(timeString) > 0)
+		timeString[strlen(timeString) - 1] = '\0';
 }
 
 #define DEFAULT_LANG "en-US"
@@ -2369,7 +2357,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 				QTStr("Cancel"), QMessageBox::NoRole);
 			mb.setDefaultButton(cancelButton);
 
-			mb.exec();
+			//mb.exec();
 			cancel_launch = mb.clickedButton() == cancelButton;
 		}
 
@@ -2406,7 +2394,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 				       QTStr("ChromeOS.Text"), buttons,
 				       nullptr);
 
-			mb.exec();
+			//mb.exec();
 			return 0;
 		}
 #endif
@@ -2447,7 +2435,7 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 				mb.addButton(QMessageBox::Close);
 			mb.setDefaultButton(closeButton);
 
-			mb.exec();
+			//mb.exec();
 			if (mb.clickedButton() == closeButton)
 				return 0;
 		}
