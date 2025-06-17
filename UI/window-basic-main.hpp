@@ -915,7 +915,6 @@ public:
 	bool LoadService();
 
 	inline Auth *GetAuth() { return auth.get(); }
-	inline obs_frontend_callbacks *GetAPI() { return api; }
 
 	inline void EnableOutputs(bool enable)
 	{

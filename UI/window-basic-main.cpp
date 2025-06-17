@@ -7283,14 +7283,12 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 					  .arg(last_error);
 		OBSMessageBox::warning(this, QTStr("Output.RecordError.Title"),
 				       msg);
-		if (api)
-			api->on_event(OBS_RECORDING_ERROR);
+
 	} else if (code == OBS_OUTPUT_NO_SPACE && isVisible()) {
 		OBSMessageBox::warning(this,
 				       QTStr("Output.RecordNoSpace.Title"),
 				       QTStr("Output.RecordNoSpace.Msg"));
-		if (api)
-			api->on_event(OBS_LOW_DISK_SPACE);
+
 	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
 
 		const char *errorDescription;
@@ -7307,8 +7305,7 @@ void OBSBasic::RecordingStop(int code, QString last_error)
 
 		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"),
 					QT_UTF8(errorMessage));
-		if (api)
-			api->on_event(OBS_RECORDING_ERROR);
+
 	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"),
 			      QSystemTrayIcon::Warning);
@@ -7531,13 +7528,10 @@ void OBSBasic::ReplayBufferStop(int code)
 		OBSMessageBox::warning(this,
 				       QTStr("Output.RecordNoSpace.Title"),
 				       QTStr("Output.RecordNoSpace.Msg"));
-		if (api)
-			api->on_event(OBS_LOW_DISK_SPACE);
+
 	} else if (code != OBS_OUTPUT_SUCCESS && isVisible()) {
 		OBSMessageBox::critical(this, QTStr("Output.RecordError.Title"),
 					QTStr("Output.RecordError.Msg"));
-		if (api)
-			api->on_event(OBS_RECORDING_ERROR);
 	} else if (code == OBS_OUTPUT_UNSUPPORTED && !isVisible()) {
 		SysTrayNotify(QTStr("Output.RecordFail.Unsupported"),
 			      QSystemTrayIcon::Warning);

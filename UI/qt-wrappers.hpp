@@ -125,4 +125,3 @@ void TruncateLabel(QLabel *label, QString newText,
 		   int length = MAX_LABEL_LENGTH);
 
 void RefreshToolBarStyling(QToolBar *toolBar);
-void WriteToLog(const QString &type, const QString &title, const QString &text);

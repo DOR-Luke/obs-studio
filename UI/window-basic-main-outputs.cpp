@@ -1111,11 +1111,11 @@ bool SimpleOutput::StartRecording()
 			error_reason = QT_UTF8(error);
 		else
 			error_reason = QTStr("Output.StartFailedGeneric");
-		if (main->GetAPI())
-			main->GetAPI()->on_event(OBS_RECORDING_ERROR);
-		// QMessageBox::critical(main,
-		// 		      QTStr("Output.StartRecordingFailed"),
-		// 		      error_reason);
+		// if (main->GetAPI())
+			// main->GetAPI()->on_event(OBS_RECORDING_ERROR);
+		QMessageBox::critical(main,
+				      QTStr("Output.StartRecordingFailed"),
+				      error_reason);
 		return false;
 	}
 
@@ -1128,10 +1128,10 @@ bool SimpleOutput::StartReplayBuffer()
 	if (!ConfigureRecording(true))
 		return false;
 	if (!obs_output_start(replayBuffer)) {
-		if (main->GetAPI())
-			main->GetAPI()->on_event(OBS_RECORDING_ERROR);
-		// QMessageBox::critical(main, QTStr("Output.StartReplayFailed"),
-		// 		      QTStr("Output.StartFailedGeneric"));
+		// if (main->GetAPI())
+			// main->GetAPI()->on_event(OBS_RECORDING_ERROR);
+		QMessageBox::critical(main, QTStr("Output.StartReplayFailed"),
+				      QTStr("Output.StartFailedGeneric"));
 		return false;
 	}
 
@@ -2005,11 +2005,11 @@ bool AdvancedOutput::StartRecording()
 		else
 			error_reason = QTStr("Output.StartFailedGeneric");
 		
-		if (main->GetAPI())
-			main->GetAPI()->on_event(OBS_RECORDING_ERROR);
-		// QMessageBox::critical(main,
-		// 		      QTStr("Output.StartRecordingFailed"),
-		// 		      error_reason);
+		// if (main->GetAPI())
+		// 	main->GetAPI()->on_event(OBS_RECORDING_ERROR);
+		QMessageBox::critical(main,
+				      QTStr("Output.StartRecordingFailed"),
+				      error_reason);
 		return false;
 	}
 
@@ -2086,10 +2086,10 @@ bool AdvancedOutput::StartReplayBuffer()
 			error_reason = QT_UTF8(error);
 		else
 			error_reason = QTStr("Output.StartFailedGeneric");
-		// QMessageBox::critical(main, QTStr("Output.StartReplayFailed"),
-		// 		      error_reason);
-		if (main->GetAPI())
-			main->GetAPI()->on_event(OBS_RECORDING_ERROR);
+		QMessageBox::critical(main, QTStr("Output.StartReplayFailed"),
+				      error_reason);
+		// if (main->GetAPI())
+		// 	main->GetAPI()->on_event(OBS_RECORDING_ERROR);
 		return false;
 	}
 
