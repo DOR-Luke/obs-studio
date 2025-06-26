@@ -175,6 +175,12 @@ static void AddExtraModulePaths()
 
 	char base_module_dir[512];
 #if defined(_WIN32)
+// 포터블 모드에서는 ProgramData 경로의 플러그인을 로드하지 않음
+	if (portable_mode) {
+		blog(LOG_INFO, "Portable mode: Skipping ProgramData plugin directory");
+		return;
+	}
+	
 	int ret = GetProgramDataPath(base_module_dir, sizeof(base_module_dir),
 				     "obs-studio/plugins/%module%");
 #elif defined(__APPLE__)
