@@ -1747,6 +1747,54 @@ static void convert_mpd_to_static(struct ffmpeg_muxer *stream)
 	struct dstr new_content = {0};
 	dstr_init(&new_content);
 	
+	/* 실제 비디오/오디오 설정값 가져오기 */
+	obs_encoder_t *vencoder = obs_output_get_video_encoder(stream->output);
+	obs_encoder_t *aencoder = obs_output_get_audio_encoder(stream->output, 0);
+	
+	/* 비디오 설정 */
+	int width = obs_output_get_width(stream->output);
+	int height = obs_output_get_height(stream->output);
+	int video_bitrate = 8000000; /* 기본값 */
+	const char *video_codec = "hev1"; /* 기본값 */
+	
+	if (vencoder) {
+		obs_data_t *vsettings = obs_encoder_get_settings(vencoder);
+		video_bitrate = (int)obs_data_get_int(vsettings, "bitrate") * 1000; /* kbps to bps */
+		const char *codec_name = obs_encoder_get_codec(vencoder);
+		if (codec_name) {
+			if (strstr(codec_name, "h264")) video_codec = "avc1";
+			else if (strstr(codec_name, "h265") || strstr(codec_name, "hevc")) video_codec = "hev1";
+			else if (strstr(codec_name, "av1")) video_codec = "av01";
+		}
+		obs_data_release(vsettings);
+	}
+	
+	/* 오디오 설정 */
+	int audio_bitrate = 192000; /* 기본값 */
+	int sample_rate = 48000; /* 기본값 */
+	int channels = 2; /* 기본값 */
+	
+	if (aencoder) {
+		obs_data_t *asettings = obs_encoder_get_settings(aencoder);
+		audio_bitrate = (int)obs_data_get_int(asettings, "bitrate") * 1000; /* kbps to bps */
+		sample_rate = (int)obs_encoder_get_sample_rate(aencoder);
+		obs_data_release(asettings);
+		
+		audio_t *audio = obs_get_audio();
+		if (audio) {
+			channels = (int)audio_output_get_channels(audio);
+		}
+	}
+	
+	/* 프레임레이트 */
+	video_t *video = obs_get_video();
+	const struct video_output_info *vinfo = video_output_get_info(video);
+	int fps_num = 60, fps_den = 1; /* 기본값 */
+	if (vinfo) {
+		fps_num = (int)vinfo->fps_num;
+		fps_den = (int)vinfo->fps_den;
+	}
+
 	/* Steam과 완전히 동일한 MPD 구조로 재작성 */
 	dstr_catf(&new_content, 
 		"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
@@ -1760,20 +1808,22 @@ static void convert_mpd_to_static(struct ffmpeg_muxer *stream)
 		"\tmaxSegmentDuration=\"PT3.0S\"\n"
 		"\tminBufferTime=\"PT6.0S\">\n"
 		"\t<Period id=\"0\" start=\"PT0.0S\">\n"
-		"\t\t<AdaptationSet id=\"0\" contentType=\"video\" startWithSAP=\"1\" segmentAlignment=\"true\" bitstreamSwitching=\"true\" maxWidth=\"1920\" maxHeight=\"1080\">\n"
-		"\t\t\t<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"hev1\" bandwidth=\"8000000\" width=\"1920\" height=\"1080\">\n"
+		"\t\t<AdaptationSet id=\"0\" contentType=\"video\" startWithSAP=\"1\" segmentAlignment=\"true\" bitstreamSwitching=\"true\" maxWidth=\"%d\" maxHeight=\"%d\">\n"
+		"\t\t\t<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"%s\" bandwidth=\"%d\" width=\"%d\" height=\"%d\">\n"
 		"\t\t\t\t<SegmentTemplate timescale=\"1000000\" duration=\"3000000\" initialization=\"init-stream$RepresentationID$.m4s\" media=\"chunk-stream$RepresentationID$-$Number%%05d$.m4s\" startNumber=\"1\" />\n"
 		"\t\t\t</Representation>\n"
 		"\t\t</AdaptationSet>\n"
 		"\t\t<AdaptationSet id=\"1\" contentType=\"audio\" startWithSAP=\"1\" segmentAlignment=\"true\" bitstreamSwitching=\"true\">\n"
-		"\t\t\t<Representation id=\"1\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"192000\" audioSamplingRate=\"48000\">\n"
-		"\t\t\t\t<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\" />\n"
+		"\t\t\t<Representation id=\"1\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"%d\" audioSamplingRate=\"%d\">\n"
+		"\t\t\t\t<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"%d\" />\n"
 		"\t\t\t\t<SegmentTemplate timescale=\"1000000\" duration=\"3000000\" initialization=\"init-stream$RepresentationID$.m4s\" media=\"chunk-stream$RepresentationID$-$Number%%05d$.m4s\" startNumber=\"1\" />\n"
 		"\t\t\t</Representation>\n"
 		"\t\t</AdaptationSet>\n"
 		"\t</Period>\n"
 		"</MPD>\n",
-		(double)(stream->last_packet_time - stream->cur_time) / 1000000.0);
+		(double)(stream->last_packet_time - stream->cur_time) / 1000000.0,
+		width, height, video_codec, video_bitrate, width, height,
+		audio_bitrate, sample_rate, channels);
 
 	/* 변환된 MPD 파일 쓰기 */
 	if (new_content.len > 0) {
