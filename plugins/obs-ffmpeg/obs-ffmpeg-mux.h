@@ -32,6 +32,7 @@ struct ffmpeg_muxer {
 	/* replay buffer */
 	int64_t save_ts;
 	int keyframes;
+	int64_t last_packet_time; /* 마지막 패킷 시간 추적 */
 	obs_hotkey_id hotkey;
 	volatile bool muxing;
 	DARRAY(struct encoder_packet) mux_packets;

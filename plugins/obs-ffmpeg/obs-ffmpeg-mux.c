@@ -1420,11 +1420,54 @@ static bool replay_buffer_start(void *data)
 	obs_data_t *s = obs_output_get_settings(stream->output);
 	stream->max_time = obs_data_get_int(s, "max_time_sec") * 1000000LL;
 	stream->max_size = obs_data_get_int(s, "max_size_mb") * (1024 * 1024);
+
+	/* Initialize DASH (m4s + MPD) when disk buffer mode enabled */
+	if (stream->use_disk_buffer) {
+		const char *output_dir = obs_data_get_string(s, "directory");
+		if (!output_dir || !*output_dir)
+			output_dir = ".";
+
+		struct dstr dash_dir = {0};
+		dstr_copy(&dash_dir, output_dir);
+		dstr_cat(&dash_dir, "/obs_dash_replay");
+		os_mkdirs(dash_dir.array);
+
+		/* manifest path */
+		struct dstr mpd_path = {0};
+		dstr_copy(&mpd_path, dash_dir.array);
+		dstr_cat(&mpd_path, "/manifest.mpd");
+
+		/* segment size and window - Steam과 동일하게 3초 */
+		int seg_sec = 3;
+		int window_size = (int)(stream->max_time / 1000000LL) / seg_sec;
+		if (window_size < 2)
+			window_size = 2;
+
+		/* pass dash options to helper - Steam 방식으로 수정 */
+		dstr_free(&stream->muxer_settings);
+		dstr_init(&stream->muxer_settings);
+		dstr_catf(&stream->muxer_settings,
+			  "use_template=1 use_timeline=0 seg_duration=%d init_seg_name=init-stream$RepresentationID$.m4s media_seg_name=chunk-stream$RepresentationID$-$Number%%05d$.m4s window_size=%d extra_window_size=1 remove_at_exit=0 streaming=1",
+			  seg_sec, window_size);
+
+		start_pipe(stream, mpd_path.array);
+		info("DASH output directory: %s", dash_dir.array);
+		info("MPD manifest path: %s", mpd_path.array);
+		
+		if (!stream->pipe) {
+			warn("Failed to start DASH helper process!");
+		} else {
+			info("DASH helper process started successfully");
+		}
+		dstr_free(&mpd_path);
+		dstr_free(&dash_dir);
+	}
 	obs_data_release(s);
 
 	os_atomic_set_bool(&stream->active, true);
 	os_atomic_set_bool(&stream->capturing, true);
 	stream->total_bytes = 0;
+	stream->last_packet_time = 0;  /* 초기화 */
 	obs_output_begin_data_capture(stream->output, 0);
 
 	return true;
@@ -1680,8 +1723,83 @@ static void replay_buffer_save(struct ffmpeg_muxer *stream)
 	}
 }
 
+static void convert_mpd_to_static(struct ffmpeg_muxer *stream)
+{
+	obs_data_t *s = obs_output_get_settings(stream->output);
+	const char *output_dir = obs_data_get_string(s, "directory");
+	if (!output_dir || !*output_dir)
+		output_dir = ".";
+
+	struct dstr mpd_path = {0};
+	dstr_copy(&mpd_path, output_dir);
+	dstr_cat(&mpd_path, "/obs_dash_replay/manifest.mpd");
+
+	/* MPD 파일 읽기 */
+	char *mpd_content = os_quick_read_utf8_file(mpd_path.array);
+	if (!mpd_content) {
+		warn("Failed to read MPD file for conversion");
+		dstr_free(&mpd_path);
+		obs_data_release(s);
+		return;
+	}
+
+	/* Steam과 동일한 static MPD 생성 */
+	struct dstr new_content = {0};
+	dstr_init(&new_content);
+	
+	/* Steam과 완전히 동일한 MPD 구조로 재작성 */
+	dstr_catf(&new_content, 
+		"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+		"<MPD xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" \n"
+		"\txmlns=\"urn:mpeg:dash:schema:mpd:2011\" \n"
+		"\txmlns:xlink=\"http://www.w3.org/1999/xlink\" \n"
+		"\txsi:schemaLocation=\"urn:mpeg:DASH:schema:MPD:2011 http://standards.iso.org/ittf/PubliclyAvailableStandards/MPEG-DASH_schema_files/DASH-MPD.xsd\" \n"
+		"\tprofiles=\"urn:mpeg:dash:profile:isoff-live:2011\"\n"
+		"\ttype=\"static\"\n"
+		"\tmediaPresentationDuration=\"PT%.1fS\"\n"
+		"\tmaxSegmentDuration=\"PT3.0S\"\n"
+		"\tminBufferTime=\"PT6.0S\">\n"
+		"\t<Period id=\"0\" start=\"PT0.0S\">\n"
+		"\t\t<AdaptationSet id=\"0\" contentType=\"video\" startWithSAP=\"1\" segmentAlignment=\"true\" bitstreamSwitching=\"true\" maxWidth=\"1920\" maxHeight=\"1080\">\n"
+		"\t\t\t<Representation id=\"0\" mimeType=\"video/mp4\" codecs=\"hev1\" bandwidth=\"8000000\" width=\"1920\" height=\"1080\">\n"
+		"\t\t\t\t<SegmentTemplate timescale=\"1000000\" duration=\"3000000\" initialization=\"init-stream$RepresentationID$.m4s\" media=\"chunk-stream$RepresentationID$-$Number%%05d$.m4s\" startNumber=\"1\" />\n"
+		"\t\t\t</Representation>\n"
+		"\t\t</AdaptationSet>\n"
+		"\t\t<AdaptationSet id=\"1\" contentType=\"audio\" startWithSAP=\"1\" segmentAlignment=\"true\" bitstreamSwitching=\"true\">\n"
+		"\t\t\t<Representation id=\"1\" mimeType=\"audio/mp4\" codecs=\"mp4a.40.2\" bandwidth=\"192000\" audioSamplingRate=\"48000\">\n"
+		"\t\t\t\t<AudioChannelConfiguration schemeIdUri=\"urn:mpeg:dash:23003:3:audio_channel_configuration:2011\" value=\"2\" />\n"
+		"\t\t\t\t<SegmentTemplate timescale=\"1000000\" duration=\"3000000\" initialization=\"init-stream$RepresentationID$.m4s\" media=\"chunk-stream$RepresentationID$-$Number%%05d$.m4s\" startNumber=\"1\" />\n"
+		"\t\t\t</Representation>\n"
+		"\t\t</AdaptationSet>\n"
+		"\t</Period>\n"
+		"</MPD>\n",
+		(double)(stream->last_packet_time - stream->cur_time) / 1000000.0);
+
+	/* 변환된 MPD 파일 쓰기 */
+	if (new_content.len > 0) {
+		os_quick_write_utf8_file_safe(mpd_path.array, new_content.array, 
+					      new_content.len, false, "tmp", NULL);
+		info("MPD converted to static format successfully");
+	}
+
+	dstr_free(&new_content);
+	dstr_free(&mpd_path);
+	bfree(mpd_content);
+	obs_data_release(s);
+}
+
 static void deactivate_replay_buffer(struct ffmpeg_muxer *stream, int code)
 {
+	/* DASH 모드: FFmpeg 프로세스 종료 후 MPD를 static으로 변환 */
+	if (stream->use_disk_buffer && stream->pipe) {
+		info("Converting DASH MPD to static format...");
+		os_process_pipe_destroy(stream->pipe);
+		stream->pipe = NULL;
+		
+		/* MPD 파일을 dynamic에서 static으로 변환 */
+		convert_mpd_to_static(stream);
+	}
+
 	if (code) {
 		obs_output_signal_stop(stream->output, code);
 	} else if (stopping(stream)) {
@@ -1717,20 +1835,40 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 
 	obs_encoder_packet_ref(&pkt, packet);
 	
-	/* FORCED DISK MODE - NO RUNTIME CHECKING */
+	/* DISK MODE (DASH): continuously pipe packets to helper dash muxer */
 	if (stream->use_disk_buffer) {
-		/* For disk mode, purging happens only when creating new segments in store_packet_to_disk() */
-		/* No need to call disk_buffer_replay_purge() here */
-		
-		/* Store packet to disk */
-		store_packet_to_disk(stream, &pkt);
-		
-		/* IMPORTANT: Release packet immediately after storing to disk to prevent memory leak */
-		obs_encoder_packet_release(&pkt);
-		
-		if (!stream->cur_time)
+		info("DASH packet received: type=%d, size=%d, dts=%lld", 
+		     pkt.type, pkt.size, pkt.dts_usec);
+		if (!stream->sent_headers) {
+			if (!send_headers(stream)) {
+				warn("Failed to send headers to DASH helper");
+				obs_encoder_packet_release(&pkt);
+				return;
+			}
+			stream->sent_headers = true;
+			info("DASH headers sent successfully");
+		}
+
+		/* 패킷 시간 정보 먼저 저장 */
+		if (!stream->cur_time) {
 			stream->cur_time = pkt.dts_usec;
+			stream->last_packet_time = pkt.dts_usec;
+			info("DASH first packet: cur_time=%lld", stream->cur_time);
+		} else {
+			/* 항상 마지막 패킷 시간 업데이트 */
+			stream->last_packet_time = pkt.dts_usec;
+			info("DASH packet update: last_time=%lld, duration=%.1fs", 
+			     stream->last_packet_time, 
+			     (double)(stream->last_packet_time - stream->cur_time) / 1000000.0);
+		}
 		stream->cur_size += pkt.size;
+
+		if (!write_packet(stream, &pkt)) {
+			warn("Failed to write packet to DASH helper");
+		} else {
+			info("DASH packet written successfully");
+		}
+		obs_encoder_packet_release(&pkt);
 	} else {
 		/* Store packet to RAM (original behavior) */
 		replay_buffer_purge(stream, &pkt);
