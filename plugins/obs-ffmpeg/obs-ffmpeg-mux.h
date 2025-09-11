@@ -59,6 +59,17 @@ struct ffmpeg_muxer {
 	int min_priority;
 	int64_t last_dts_usec;
 
+	/* disk buffer mode - segment-based like Steam */
+	bool use_disk_buffer;
+	struct dstr disk_buffer_dir;     /* Directory for segments */
+	FILE *current_segment_file;      /* Current writing segment */
+	int current_segment_id;          /* Current segment number */
+	int max_segments;                /* Max segments to keep */
+	int64_t segment_start_time;      /* When current segment started */
+	int64_t segment_duration_usec;   /* Duration per segment (microseconds) */
+	int64_t disk_packet_count;
+	int64_t disk_buffer_size;
+
 	bool is_network;
 	bool split_file;
 	bool allow_overwrite;

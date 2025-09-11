@@ -23,6 +23,24 @@
 #endif
 
 #include <libavformat/avformat.h>
+#include <time.h>
+#include <stdlib.h>
+
+/* Disk buffer packet header structure */
+struct disk_packet_header {
+	uint32_t magic;        /* Magic number for validation */
+	uint32_t size;         /* Packet data size */
+	uint32_t type;         /* Packet type (video/audio) */
+	uint64_t dts_usec;     /* DTS timestamp in microseconds */
+	int64_t pts;           /* Original PTS value */
+	int64_t dts;           /* Original DTS value */
+	uint32_t timebase_den; /* Original timebase denominator */
+	uint32_t keyframe;     /* Is keyframe? */
+	uint32_t track_idx;    /* Track index */
+	uint32_t reserved;     /* Reserved for future use */
+};
+
+#define DISK_PACKET_MAGIC 0x4F425344  /* "OBSD" */
 
 #define do_log(level, format, ...)                  \
 	blog(level, "[ffmpeg muxer: '%s'] " format, \
@@ -45,15 +63,350 @@ static const char *ffmpeg_mpegts_mux_getname(void *type)
 }
 #endif
 
-static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
+/* Check if disk buffer mode is enabled - FORCED TO TRUE FOR TESTING */
+static bool is_disk_buffer_mode_enabled(obs_output_t *output)
 {
-	while (stream->packets.size > 0) {
-		struct encoder_packet pkt;
-		circlebuf_pop_front(&stream->packets, &pkt, sizeof(pkt));
-		obs_encoder_packet_release(&pkt);
+	UNUSED_PARAMETER(output);
+	
+	/* FORCE DISK MODE FOR TESTING */
+	blog(LOG_INFO, "[Replay Buffer] FORCED DISK MODE FOR TESTING");
+	return true;
+}
+
+/* Forward declaration for create_new_segment */
+static bool create_new_segment(struct ffmpeg_muxer *stream);
+
+/* Initialize segment-based disk buffer */
+static bool init_segment_disk_buffer(struct ffmpeg_muxer *stream)
+{
+	if (stream->current_segment_file)
+		return true;
+
+	/* Get the replay buffer output directory from settings */
+	obs_data_t *settings = obs_output_get_settings(stream->output);
+	const char *output_dir = obs_data_get_string(settings, "directory");
+	
+	const char *temp_dir = output_dir;
+	if (!temp_dir || !*temp_dir) {
+		temp_dir = ".";
+	}
+	
+	/* Create segments directory */
+	char segments_dir[512];
+	snprintf(segments_dir, sizeof(segments_dir), 
+		"%s/obs_replay_segments", temp_dir);
+	
+	/* Create directory if it doesn't exist */
+	os_mkdirs(segments_dir);
+	
+	dstr_copy(&stream->disk_buffer_dir, segments_dir);
+	
+	/* Initialize segment parameters */
+	stream->current_segment_id = 0;
+	stream->max_segments = (int)(stream->max_time / 10000000LL) + 1; /* 10 seconds per segment for testing */
+	if (stream->max_segments < 2) stream->max_segments = 2;
+	stream->segment_duration_usec = 10 * 1000000LL; /* 10 seconds per segment for testing */
+	stream->segment_start_time = 0;
+	
+	info("Segment disk buffer initialized: max_time=%d max_segments=%d, segment_duration=%lld seconds", 
+		(int)(stream->max_time / 1000000LL), stream->max_segments, stream->segment_duration_usec / 1000000LL);
+	
+	obs_data_release(settings);
+	
+	/* Create first segment */
+	return create_new_segment(stream);
+}
+
+/* Create a new segment file */
+static bool create_new_segment(struct ffmpeg_muxer *stream)
+{
+	/* Close current segment if exists */
+	if (stream->current_segment_file) {
+		fclose(stream->current_segment_file);
+		stream->current_segment_file = NULL;
+	}
+	
+	/* Remove old segment if we exceed max_segments */
+	if (stream->current_segment_id >= stream->max_segments) {
+		char old_segment[512];
+		snprintf(old_segment, sizeof(old_segment),
+			"%s/segment_%03d.tmp",
+			stream->disk_buffer_dir.array,
+			stream->current_segment_id - stream->max_segments);
+		
+		remove(old_segment);
+		info("Removed old segment: %s", old_segment);
+	}
+	
+	/* Create new segment file using CURRENT segment_id */
+	char new_segment[512];
+	snprintf(new_segment, sizeof(new_segment),
+		"%s/segment_%03d.tmp",
+		stream->disk_buffer_dir.array,
+		stream->current_segment_id);
+	
+	stream->current_segment_file = fopen(new_segment, "wb");
+	if (!stream->current_segment_file) {
+		warn("Failed to create segment: %s", new_segment);
+		return false;
+	}
+	
+	info("Created new segment: segment_%03d.tmp (current_segment_id=%d)", 
+		stream->current_segment_id, stream->current_segment_id);
+	
+	/* INCREMENT ID AFTER successful creation */
+	stream->current_segment_id++;
+	stream->segment_start_time = 0; /* Will be set on first packet */
+	
+	return true;
+}
+
+/* Store packet to segment-based disk buffer */
+static void store_packet_to_disk(struct ffmpeg_muxer *stream, 
+                                struct encoder_packet *packet)
+{
+	if (!init_segment_disk_buffer(stream))
+		return;
+
+	/* Check if we need to start a new segment based on time */
+	if (stream->segment_start_time == 0) {
+		stream->segment_start_time = packet->dts_usec;
+		info("First packet stored, segment_start_time set to %lld", stream->segment_start_time);
+	} else {
+		int64_t segment_duration = packet->dts_usec - stream->segment_start_time;
+		if (segment_duration > stream->segment_duration_usec) {
+			/* Time to create a new segment */
+			info("Creating new segment: duration %lld usec > %lld usec", 
+				segment_duration, stream->segment_duration_usec);
+			if (!create_new_segment(stream))
+				return;
+			stream->segment_start_time = packet->dts_usec;
+		}
 	}
 
-	circlebuf_free(&stream->packets);
+	struct disk_packet_header header = {
+		.magic = DISK_PACKET_MAGIC,
+		.size = (uint32_t)packet->size,
+		.type = (uint32_t)packet->type,
+		.dts_usec = packet->dts_usec,
+		.pts = packet->pts,
+		.dts = packet->dts,
+		.timebase_den = packet->timebase_den,
+		.keyframe = packet->keyframe ? 1 : 0,
+		.track_idx = (uint32_t)packet->track_idx,
+		.reserved = 0
+	};
+	
+	/* Write header to current segment */
+	if (fwrite(&header, sizeof(header), 1, stream->current_segment_file) != 1) {
+		warn("Failed to write packet header to segment");
+		return;
+	}
+	
+	/* Write packet data to current segment */
+	if (fwrite(packet->data, packet->size, 1, stream->current_segment_file) != 1) {
+		warn("Failed to write packet data to segment");
+		return;
+	}
+	
+	fflush(stream->current_segment_file);
+	
+	stream->disk_packet_count++;
+	stream->disk_buffer_size += sizeof(header) + packet->size;
+}
+
+/* Remove oldest segment from disk buffer - TRUE front purging like RAM! */
+static bool disk_buffer_purge_front(struct ffmpeg_muxer *stream)
+{
+	if (stream->keyframes <= 2)
+		return false;
+	
+	/* Find the oldest existing segment to remove, but PROTECT current segment */
+	int start_search = stream->current_segment_id - stream->max_segments;
+	if (start_search < 0) start_search = 0;
+	
+	/* NEVER delete the current segment being written to */
+	int end_search = stream->current_segment_id - 1;
+	if (end_search < 0) {
+		info("No segments available to purge (current_segment_id=%d)", stream->current_segment_id);
+		return false;
+	}
+	
+	for (int seg_id = start_search; seg_id <= end_search; seg_id++) {
+		char segment_file[512];
+		snprintf(segment_file, sizeof(segment_file),
+			"%s/segment_%03d.tmp",
+			stream->disk_buffer_dir.array, seg_id);
+		
+		/* Check if file exists */
+		FILE *test_file = fopen(segment_file, "rb");
+		if (test_file) {
+			fclose(test_file);
+			
+			/* Remove this oldest existing segment */
+			if (remove(segment_file) == 0) {
+				info("Purged oldest existing segment: segment_%03d.tmp", seg_id);
+				stream->keyframes--; /* Approximate keyframe reduction */
+				return true;
+			} else {
+				warn("Failed to remove segment: segment_%03d.tmp", seg_id);
+				return false;
+			}
+		}
+	}
+	
+	info("No segments found to purge (searched %d to %d, protecting current segment %d)", 
+		start_search, end_search, stream->current_segment_id - 1);
+	return false;
+}
+
+/* Disk buffer purge - MODIFIED for segment-based approach */
+static void disk_buffer_replay_purge(struct ffmpeg_muxer *stream, struct encoder_packet *pkt)
+{
+	/* For segment-based disk buffer, we purge more conservatively */
+	if (stream->keyframes <= 2)
+		return;
+
+	/* Size-based purge: only if significantly over limit */
+	if (stream->max_size) {
+		if ((stream->cur_size + (int64_t)pkt->size) > (stream->max_size * 1.5)) {
+			info("Size-based purge triggered: %lld > %lld", 
+				stream->cur_size, stream->max_size);
+			disk_buffer_purge_front(stream);
+		}
+	}
+
+	/* Time-based purge: only if significantly over limit */
+	if ((pkt->dts_usec - stream->cur_time) > (stream->max_time * 1.2)) {
+		info("Time-based purge triggered: %lld > %lld", 
+			(pkt->dts_usec - stream->cur_time), stream->max_time);
+		disk_buffer_purge_front(stream);
+	}
+}
+
+/* Clean up segment-based disk buffer */
+static void cleanup_disk_buffer(struct ffmpeg_muxer *stream)
+{
+	if (stream->current_segment_file) {
+		fclose(stream->current_segment_file);
+		stream->current_segment_file = NULL;
+	}
+	
+	/* Remove all segment files */
+	if (stream->disk_buffer_dir.array) {
+		for (int i = 0; i < stream->current_segment_id; i++) {
+			char segment_file[512];
+			snprintf(segment_file, sizeof(segment_file),
+				"%s/segment_%03d.tmp",
+				stream->disk_buffer_dir.array, i);
+			remove(segment_file);
+		}
+		
+		/* Remove segments directory if empty */
+		os_rmdir(stream->disk_buffer_dir.array);
+		dstr_free(&stream->disk_buffer_dir);
+	}
+	
+	stream->current_segment_id = 0;
+	stream->disk_packet_count = 0;
+	stream->disk_buffer_size = 0;
+}
+
+/* Load packets from all segments for muxing */
+static bool load_packets_from_disk_for_mux(struct ffmpeg_muxer *stream)
+{
+	if (!stream->current_segment_file || !stream->disk_buffer_dir.array)
+		return false;
+
+	/* Clear existing mux packets */
+	for (size_t i = 0; i < stream->mux_packets.num; i++)
+		obs_encoder_packet_release(&stream->mux_packets.array[i]);
+	da_free(stream->mux_packets);
+
+	/* Read packets from all existing segments in order */
+	int start_segment = stream->current_segment_id - stream->max_segments;
+	if (start_segment < 0) start_segment = 0;
+	
+	info("Loading segments for mux: start_segment=%d, current_segment_id=%d", 
+		start_segment, stream->current_segment_id);
+	
+	/* Read all segments up to (but not including) current_segment_id
+	   since current_segment_id points to the NEXT segment to be created */
+	int end_segment = stream->current_segment_id - 1;
+	
+	info("Reading segments from %d to %d (current_segment_id=%d)", 
+		start_segment, end_segment, stream->current_segment_id);
+	
+	for (int seg_id = start_segment; seg_id <= end_segment; seg_id++) {
+		char segment_file[512];
+		snprintf(segment_file, sizeof(segment_file),
+			"%s/segment_%03d.tmp",
+			stream->disk_buffer_dir.array, seg_id);
+		
+		FILE *read_file = fopen(segment_file, "rb");
+		if (!read_file) {
+			warn("Failed to open segment file: %s", segment_file);
+			continue; /* Skip missing segments */
+		}
+		
+		info("Reading packets from segment: %s", segment_file);
+		
+		struct disk_packet_header header;
+		struct encoder_packet packet;
+		
+		while (fread(&header, sizeof(header), 1, read_file) == 1) {
+			if (header.magic != DISK_PACKET_MAGIC) {
+				warn("Invalid packet magic in segment %d", seg_id);
+				break;
+			}
+			
+			/* Allocate packet data */
+			uint8_t *data = bmalloc(header.size);
+			if (fread(data, header.size, 1, read_file) != 1) {
+				bfree(data);
+				warn("Failed to read packet data from segment %d", seg_id);
+				break;
+			}
+			
+			/* Create encoder packet - restore ALL original values */
+			memset(&packet, 0, sizeof(packet));
+			packet.data = data;
+			packet.size = header.size;
+			packet.type = (enum obs_encoder_type)header.type;
+			packet.dts_usec = header.dts_usec;
+			packet.pts = header.pts;
+			packet.dts = header.dts;
+			packet.timebase_den = header.timebase_den;
+			packet.keyframe = header.keyframe != 0;
+			packet.track_idx = (size_t)header.track_idx;
+			
+			/* Add to mux packets array */
+			da_push_back(stream->mux_packets, &packet);
+		}
+		
+		fclose(read_file);
+	}
+	
+	info("Loaded %lu packets from %d segments for muxing", 
+		(unsigned long)stream->mux_packets.num,
+		stream->current_segment_id - start_segment);
+	
+	return stream->mux_packets.num > 0;
+}
+
+static inline void replay_buffer_clear(struct ffmpeg_muxer *stream)
+{
+	if (stream->use_disk_buffer) {
+		cleanup_disk_buffer(stream);
+	} else {
+		while (stream->packets.size > 0) {
+			struct encoder_packet pkt;
+			circlebuf_pop_front(&stream->packets, &pkt, sizeof(pkt));
+			obs_encoder_packet_release(&pkt);
+		}
+		circlebuf_free(&stream->packets);
+	}
+
 	stream->cur_size = 0;
 	stream->cur_time = 0;
 	stream->max_size = 0;
@@ -1007,6 +1360,24 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
 
+	/* Check if disk buffer mode is enabled */
+	stream->use_disk_buffer = is_disk_buffer_mode_enabled(output);
+	
+	/* Initialize disk buffer fields */
+	if (stream->use_disk_buffer) {
+		dstr_init(&stream->disk_buffer_dir);
+		stream->current_segment_file = NULL;
+		stream->current_segment_id = 0;
+		stream->max_segments = 5; /* Default 5 segments */
+		stream->segment_start_time = 0;
+		stream->segment_duration_usec = 60 * 1000000LL; /* 60 seconds per segment */
+		stream->disk_packet_count = 0;
+		stream->disk_buffer_size = 0;
+		info("Replay buffer initialized in segment-based disk mode");
+	} else {
+		info("Replay buffer initialized in RAM mode");
+	}
+
 	stream->hotkey =
 		obs_hotkey_register_output(output, "ReplayBuffer.Save",
 					   obs_module_text("ReplayBuffer.Save"),
@@ -1026,6 +1397,12 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 static void replay_buffer_destroy(void *data)
 {
 	struct ffmpeg_muxer *stream = data;
+	
+	/* Clean up disk buffer if in disk mode */
+	if (stream->use_disk_buffer) {
+		cleanup_disk_buffer(stream);
+	}
+	
 	if (stream->hotkey)
 		obs_hotkey_unregister(stream->hotkey);
 	ffmpeg_mux_destroy(data);
@@ -1201,43 +1578,94 @@ error:
 
 static void replay_buffer_save(struct ffmpeg_muxer *stream)
 {
-	const size_t size = sizeof(struct encoder_packet);
-	size_t num_packets = stream->packets.size / size;
-
-	da_reserve(stream->mux_packets, num_packets);
-
-	/* ---------------------------- */
-	/* reorder packets */
-
-	bool found_video = false;
-	bool found_audio[MAX_AUDIO_MIXES] = {0};
-	int64_t video_offset = 0;
-	int64_t video_pts_offset = 0;
-	int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
-	int64_t audio_dts_offsets[MAX_AUDIO_MIXES] = {0};
-
-	for (size_t i = 0; i < num_packets; i++) {
-		struct encoder_packet *pkt;
-		pkt = circlebuf_data(&stream->packets, i * size);
-
-		if (pkt->type == OBS_ENCODER_VIDEO) {
-			if (!found_video) {
-				video_pts_offset = pkt->pts;
-				video_offset = video_pts_offset * 1000000 /
-					       pkt->timebase_den;
-				found_video = true;
-			}
-		} else {
-			if (!found_audio[pkt->track_idx]) {
-				found_audio[pkt->track_idx] = true;
-				audio_offsets[pkt->track_idx] = pkt->dts_usec;
-				audio_dts_offsets[pkt->track_idx] = pkt->dts;
-			}
+	if (stream->use_disk_buffer) {
+		/* Load packets from disk buffer for muxing */
+		if (!load_packets_from_disk_for_mux(stream)) {
+			warn("Failed to load packets from disk buffer for muxing");
+			return;
 		}
+		
+		/* Process disk packets the same way as RAM packets - reorder and fix timestamps */
+		bool found_video = false;
+		bool found_audio[MAX_AUDIO_MIXES] = {0};
+		int64_t video_offset = 0;
+		int64_t video_pts_offset = 0;
+		int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
+		int64_t audio_dts_offsets[MAX_AUDIO_MIXES] = {0};
 
-		insert_packet(&stream->mux_packets.da, pkt, video_offset,
-			      audio_offsets, video_pts_offset,
-			      audio_dts_offsets);
+		/* Create a copy of packets for reordering */
+		DARRAY(struct encoder_packet) temp_packets;
+		da_init(temp_packets);
+		
+		for (size_t i = 0; i < stream->mux_packets.num; i++) {
+			struct encoder_packet *pkt = &stream->mux_packets.array[i];
+
+			if (pkt->type == OBS_ENCODER_VIDEO) {
+				if (!found_video) {
+					video_pts_offset = pkt->pts;
+					video_offset = video_pts_offset * 1000000 /
+						       pkt->timebase_den;
+					found_video = true;
+				}
+			} else {
+				if (!found_audio[pkt->track_idx]) {
+					found_audio[pkt->track_idx] = true;
+					audio_offsets[pkt->track_idx] = pkt->dts_usec;
+					audio_dts_offsets[pkt->track_idx] = pkt->dts;
+				}
+			}
+
+			insert_packet(&temp_packets.da, pkt, video_offset,
+				      audio_offsets, video_pts_offset,
+				      audio_dts_offsets);
+		}
+		
+		/* Replace mux_packets with reordered packets */
+		for (size_t i = 0; i < stream->mux_packets.num; i++)
+			obs_encoder_packet_release(&stream->mux_packets.array[i]);
+		da_free(stream->mux_packets);
+		stream->mux_packets.da = temp_packets.da;
+		
+	} else {
+		/* Original RAM-based packet processing */
+		const size_t size = sizeof(struct encoder_packet);
+		size_t num_packets = stream->packets.size / size;
+
+		da_reserve(stream->mux_packets, num_packets);
+
+		/* ---------------------------- */
+		/* reorder packets */
+
+		bool found_video = false;
+		bool found_audio[MAX_AUDIO_MIXES] = {0};
+		int64_t video_offset = 0;
+		int64_t video_pts_offset = 0;
+		int64_t audio_offsets[MAX_AUDIO_MIXES] = {0};
+		int64_t audio_dts_offsets[MAX_AUDIO_MIXES] = {0};
+
+		for (size_t i = 0; i < num_packets; i++) {
+			struct encoder_packet *pkt;
+			pkt = circlebuf_data(&stream->packets, i * size);
+
+			if (pkt->type == OBS_ENCODER_VIDEO) {
+				if (!found_video) {
+					video_pts_offset = pkt->pts;
+					video_offset = video_pts_offset * 1000000 /
+						       pkt->timebase_den;
+					found_video = true;
+				}
+			} else {
+				if (!found_audio[pkt->track_idx]) {
+					found_audio[pkt->track_idx] = true;
+					audio_offsets[pkt->track_idx] = pkt->dts_usec;
+					audio_dts_offsets[pkt->track_idx] = pkt->dts;
+				}
+			}
+
+			insert_packet(&stream->mux_packets.da, pkt, video_offset,
+				      audio_offsets, video_pts_offset,
+				      audio_dts_offsets);
+		}
 	}
 
 	generate_filename(stream, &stream->path, true);
@@ -1288,13 +1716,31 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	}
 
 	obs_encoder_packet_ref(&pkt, packet);
-	replay_buffer_purge(stream, &pkt);
+	
+	/* FORCED DISK MODE - NO RUNTIME CHECKING */
+	if (stream->use_disk_buffer) {
+		/* For disk mode, purging happens only when creating new segments in store_packet_to_disk() */
+		/* No need to call disk_buffer_replay_purge() here */
+		
+		/* Store packet to disk */
+		store_packet_to_disk(stream, &pkt);
+		
+		/* IMPORTANT: Release packet immediately after storing to disk to prevent memory leak */
+		obs_encoder_packet_release(&pkt);
+		
+		if (!stream->cur_time)
+			stream->cur_time = pkt.dts_usec;
+		stream->cur_size += pkt.size;
+	} else {
+		/* Store packet to RAM (original behavior) */
+		replay_buffer_purge(stream, &pkt);
 
-	if (!stream->packets.size)
-		stream->cur_time = pkt.dts_usec;
-	stream->cur_size += pkt.size;
+		if (!stream->packets.size)
+			stream->cur_time = pkt.dts_usec;
+		stream->cur_size += pkt.size;
 
-	circlebuf_push_back(&stream->packets, packet, sizeof(*packet));
+		circlebuf_push_back(&stream->packets, packet, sizeof(*packet));
+	}
 
 	if (packet->type == OBS_ENCODER_VIDEO && packet->keyframe)
 		stream->keyframes++;
@@ -1320,6 +1766,7 @@ static void replay_buffer_defaults(obs_data_t *s)
 	obs_data_set_default_string(s, "format", "%CCYY-%MM-%DD %hh-%mm-%ss");
 	obs_data_set_default_string(s, "extension", "mp4");
 	obs_data_set_default_bool(s, "allow_spaces", true);
+	obs_data_set_default_bool(s, "use_disk_buffer", false);
 }
 
 struct obs_output_info replay_buffer = {
