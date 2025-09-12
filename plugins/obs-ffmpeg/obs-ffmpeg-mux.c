@@ -1429,7 +1429,7 @@ static bool replay_buffer_start(void *data)
 
 		struct dstr dash_dir = {0};
 		dstr_copy(&dash_dir, output_dir);
-		dstr_cat(&dash_dir, "/obs_dash_replay");
+		dstr_cat(&dash_dir, "/dash_replay");
 		os_mkdirs(dash_dir.array);
 
 		/* manifest path */
