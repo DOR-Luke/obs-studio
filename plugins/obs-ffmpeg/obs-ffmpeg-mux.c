@@ -17,9 +17,11 @@
 #include "ffmpeg-mux/ffmpeg-mux.h"
 #include "obs-ffmpeg-mux.h"
 #include "obs-ffmpeg-formats.h"
+#include <util/config-file.h>
 
 #ifdef _WIN32
 #include "util/windows/win-version.h"
+#include <windows.h>
 #endif
 
 #include <libavformat/avformat.h>
@@ -63,14 +65,71 @@ static const char *ffmpeg_mpegts_mux_getname(void *type)
 }
 #endif
 
-/* Check if disk buffer mode is enabled - FORCED TO TRUE FOR TESTING */
+/* Check if disk buffer mode is enabled - reads from basic.ini every time */
 static bool is_disk_buffer_mode_enabled(obs_output_t *output)
 {
 	UNUSED_PARAMETER(output);
 	
-	/* FORCE DISK MODE FOR TESTING */
-	blog(LOG_INFO, "[Replay Buffer] FORCED DISK MODE FOR TESTING");
-	return true;
+	/* Get OBS executable path and construct config path */
+	char exe_path[512] = {0}; /* Initialize array */
+#ifdef _WIN32
+	if (!GetModuleFileNameA(NULL, exe_path, sizeof(exe_path) - 1)) {
+		blog(LOG_WARNING, "[Replay Buffer] Failed to get executable path");
+		return false;
+	}
+	exe_path[sizeof(exe_path) - 1] = '\0'; /* Ensure null termination */
+#else
+	blog(LOG_WARNING, "[Replay Buffer] Path detection only supported on Windows");
+	return false;
+#endif
+	
+	/* Remove bin\64bit from path: C:\...\test\bin\64bit\obs64.exe -> C:\...\test */
+	char *last_slash = strrchr(exe_path, '\\');
+	if (last_slash) *last_slash = '\0'; // Remove obs64.exe
+	last_slash = strrchr(exe_path, '\\');
+	if (last_slash) *last_slash = '\0'; // Remove 64bit
+	last_slash = strrchr(exe_path, '\\');
+	if (last_slash) *last_slash = '\0'; // Remove bin
+	
+	/* Try possible profile names */
+	const char *profile_names[] = {
+		"제목 없음",
+		"NoneTitle",
+		"Untitled"
+	};
+	
+	config_t *config = NULL;
+	struct dstr config_file = {0};
+	bool found = false;
+	
+	for (int i = 0; i < 3; i++) {
+		dstr_printf(&config_file, "%s\\config\\obs-studio\\basic\\profiles\\%s\\basic.ini", 
+			exe_path, profile_names[i]);
+		
+		if (config_open(&config, config_file.array, CONFIG_OPEN_EXISTING) == CONFIG_SUCCESS) {
+			blog(LOG_INFO, "[Replay Buffer] Found config file: %s", config_file.array);
+			found = true;
+			break;
+		}
+	}
+	
+	if (!found) {
+		blog(LOG_WARNING, "[Replay Buffer] No config file found in any profile, using default (false)");
+		dstr_free(&config_file);
+		return false;
+	}
+	
+	bool use_disk_buffer = config_get_bool(config, "ReplayBuffer", "use_disk_buffer");
+	
+	blog(LOG_INFO, "[Replay Buffer] [ReplayBuffer] use_disk_buffer: %s", 
+		use_disk_buffer ? "true" : "false");
+	
+	blog(LOG_INFO, "[Replay Buffer] Disk buffer mode: %s", 
+		use_disk_buffer ? "ENABLED" : "DISABLED");
+	
+	config_close(config);
+	dstr_free(&config_file);
+	return use_disk_buffer;
 }
 
 /* Forward declaration for create_new_segment */
@@ -1360,7 +1419,7 @@ static void *replay_buffer_create(obs_data_t *settings, obs_output_t *output)
 	struct ffmpeg_muxer *stream = bzalloc(sizeof(*stream));
 	stream->output = output;
 
-	/* Check if disk buffer mode is enabled */
+	/* Check if disk buffer mode is enabled from settings */
 	stream->use_disk_buffer = is_disk_buffer_mode_enabled(output);
 	
 	/* Initialize disk buffer fields */
@@ -1420,6 +1479,9 @@ static bool replay_buffer_start(void *data)
 	obs_data_t *s = obs_output_get_settings(stream->output);
 	stream->max_time = obs_data_get_int(s, "max_time_sec") * 1000000LL;
 	stream->max_size = obs_data_get_int(s, "max_size_mb") * (1024 * 1024);
+
+	/* Re-check disk buffer mode setting on start (for real-time config changes) */
+	stream->use_disk_buffer = is_disk_buffer_mode_enabled(stream->output);
 
 	/* Initialize DASH (m4s + MPD) when disk buffer mode enabled */
 	if (stream->use_disk_buffer) {
@@ -1732,7 +1794,7 @@ static void convert_mpd_to_static(struct ffmpeg_muxer *stream)
 
 	struct dstr mpd_path = {0};
 	dstr_copy(&mpd_path, output_dir);
-	dstr_cat(&mpd_path, "/obs_dash_replay/manifest.mpd");
+	dstr_cat(&mpd_path, "/dash_replay/manifest.mpd");
 
 	/* MPD 파일 읽기 */
 	char *mpd_content = os_quick_read_utf8_file(mpd_path.array);
@@ -1887,8 +1949,6 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 	
 	/* DISK MODE (DASH): continuously pipe packets to helper dash muxer */
 	if (stream->use_disk_buffer) {
-		info("DASH packet received: type=%d, size=%d, dts=%lld", 
-		     pkt.type, pkt.size, pkt.dts_usec);
 		if (!stream->sent_headers) {
 			if (!send_headers(stream)) {
 				warn("Failed to send headers to DASH helper");
@@ -1903,20 +1963,14 @@ static void replay_buffer_data(void *data, struct encoder_packet *packet)
 		if (!stream->cur_time) {
 			stream->cur_time = pkt.dts_usec;
 			stream->last_packet_time = pkt.dts_usec;
-			info("DASH first packet: cur_time=%lld", stream->cur_time);
 		} else {
 			/* 항상 마지막 패킷 시간 업데이트 */
 			stream->last_packet_time = pkt.dts_usec;
-			info("DASH packet update: last_time=%lld, duration=%.1fs", 
-			     stream->last_packet_time, 
-			     (double)(stream->last_packet_time - stream->cur_time) / 1000000.0);
 		}
 		stream->cur_size += pkt.size;
 
 		if (!write_packet(stream, &pkt)) {
 			warn("Failed to write packet to DASH helper");
-		} else {
-			info("DASH packet written successfully");
 		}
 		obs_encoder_packet_release(&pkt);
 	} else {
@@ -1954,7 +2008,7 @@ static void replay_buffer_defaults(obs_data_t *s)
 	obs_data_set_default_string(s, "format", "%CCYY-%MM-%DD %hh-%mm-%ss");
 	obs_data_set_default_string(s, "extension", "mp4");
 	obs_data_set_default_bool(s, "allow_spaces", true);
-	obs_data_set_default_bool(s, "use_disk_buffer", false);
+	obs_data_set_default_bool(s, "use_disk_buffer", true);
 }
 
 struct obs_output_info replay_buffer = {
